@@ -214,6 +214,7 @@
     // (±180°) so a jump like 178° → -175° takes the short way across the
     // Pacific instead of a straight (wrong) line all the way across the map.
     function drawGeoPolyline(map, points, style) {
+        points = RouteLine.collapse(points);
         let segment = [];
         points.forEach((pt, i) => {
             if (i > 0 && Math.abs(pt[1] - points[i - 1][1]) > 180) {
@@ -432,15 +433,8 @@
                 const isPoint = item.type === 'point';
                 const color   = isPoint ? '#0d6efd' : '#198754';
 
-                // Coordinate uncertainty radius (metres) — how much to trust the pin.
-                if (item.coord_uncertainty_m) {
-                    L.circle([item.lat, item.lon], {
-                        renderer, radius: item.coord_uncertainty_m,
-                        color, weight: 1, fillColor: color, fillOpacity: 0.08,
-                        interactive: false,
-                    }).addTo(map);
-                }
 
+                UncertaintyRadius.add(item, color, renderer);
                 const marker  = L.circleMarker([item.lat, item.lon], {
                     renderer, radius: isPoint ? 10 : 6,
                     color, fillColor: color, fillOpacity: isPoint ? 0.9 : 0.7,
@@ -450,12 +444,15 @@
                 marker.bindPopup(`${img}<strong>${escHtml(item.name||'—')}</strong><br><small>${escHtml(item.date_label||'')}</small>`, { maxWidth: 260 });
                 marker.on('click', () => scrollToRow(item.id));
                 markers[item.id] = marker;
+                OverlapGroups.add(marker, item, color);  // specimens at identical coordinates: spiderfy on click
                 allPoints.push([item.lat, item.lon]);
                 // Only items with a real date can be placed in the chronology —
                 // undated items would otherwise all land on the same fallback
                 // sort position and connect to each other in arbitrary order.
-                if (item.date_label) datedPoints.push([item.lat, item.lon]);
+                if (item.date_label) datedPoints.push([item.lat, item.lon, item.date_label, item.type]);
             });
+
+            OverlapGroups.finish();
 
             // Route line follows the chronology (itinerary points + dated specimens).
             drawGeoPolyline(map, datedPoints, { color: '#6c757d', weight: 1.5, opacity: 0.4 });

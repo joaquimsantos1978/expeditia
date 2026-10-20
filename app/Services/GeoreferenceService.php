@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use App\Models\Specimen;
 
@@ -22,11 +23,92 @@ class GeoreferenceService
      */
     public function lookupByGbifId(string $gbifId): ?array
     {
-        $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
-            ->timeout(15)
-            ->get(self::API_URL . 'occurrences/' . $gbifId);
+        try {
+            $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
+                ->connectTimeout(5)
+                ->timeout(15)
+                ->get(self::API_URL . 'occurrences/' . $gbifId);
+        } catch (ConnectionException $e) {
+            // Can't reach georeference.it at all (DNS, firewall, down). This
+            // is enrichment, not core data — never let it 500 the sync step.
+            if (++$this->consecutiveFailures === self::UNAVAILABLE_AFTER) {
+                \Log::warning('georeference.it unreachable, skipping it for this step: ' . $e->getMessage());
+            }
+            return null;
+        }
+
+        $this->consecutiveFailures = 0;
 
         return $response->ok() ? $response->json() : null;
+    }
+
+    // How many GBIF keys go in one batch request. Matches the cap in
+    // georeference.it's OccurrenceController (MAX_OCCURRENCE_IDS).
+    const BATCH_SIZE = 100;
+
+    // Set when the server turns out to predate the occurrenceIDs filter, so the
+    // remaining chunks of THIS request go straight to per-specimen lookups.
+    // Deliberately kept in memory only: nothing from georeference.it is cached
+    // between requests, since citizens' edits there must show up immediately.
+    private bool $batchSupported = true;
+
+    /**
+     * Look up many occurrences in one request via the occurrenceIDs filter.
+     * Returns ['k<gbifId>' => raw record, ...] — ids georeference.it doesn't
+     * know are simply absent (the "k" prefix keeps 32-bit PHP from coercing
+     * big numeric keys). Returns null when the batch path can't be used (older
+     * server without the filter, or any failure): callers fall back to
+     * lookupByGbifId() per specimen, and should check isUnavailable() first.
+     */
+    public function lookupMany(array $gbifIds): ?array
+    {
+        $gbifIds = array_values(array_unique(array_map('strval', array_filter($gbifIds))));
+        if (!$gbifIds) return [];
+        if (!$this->batchSupported) return null;
+
+        try {
+            $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
+                ->connectTimeout(5)
+                ->timeout(30)
+                ->get(self::API_URL . 'occurrences', [
+                    'occurrenceIDs' => implode('|', $gbifIds),
+                    'perPage'       => count($gbifIds),
+                ]);
+        } catch (ConnectionException $e) {
+            if (++$this->consecutiveFailures === self::UNAVAILABLE_AFTER) {
+                \Log::warning('georeference.it unreachable, skipping it for this step: ' . $e->getMessage());
+            }
+            return null;
+        }
+
+        $this->consecutiveFailures = 0;
+
+        $json = $response->ok() ? $response->json() : null;
+        if (!is_array($json) || !isset($json['data'], $json['meta']['total'])) return null;
+
+        // A server that ignores the unknown filter answers with an arbitrary
+        // page of *all* its occurrences. A working filter can never match more
+        // records than ids we asked for — so a bigger total means "unsupported".
+        if ((int) $json['meta']['total'] > count($gbifIds)) {
+            $this->batchSupported = false;
+            return null;
+        }
+
+        $records = [];
+        foreach ($json['data'] as $row) {
+            if (isset($row['occurrenceID'])) $records['k' . $row['occurrenceID']] = $row;
+        }
+        return $records;
+    }
+    // A few failures in a row means the service itself is down (not one bad
+    // record), so callers stop hammering it and move on.
+    const UNAVAILABLE_AFTER = 3;
+
+    private int $consecutiveFailures = 0;
+
+    public function isUnavailable(): bool
+    {
+        return $this->consecutiveFailures >= self::UNAVAILABLE_AFTER;
     }
 
     /**
@@ -60,7 +142,16 @@ class GeoreferenceService
     {
         if (!$specimen->gbif_id) return false;
 
-        $raw = $this->lookupByGbifId($specimen->gbif_id);
+        return $this->applyRecord($specimen, $this->lookupByGbifId($specimen->gbif_id));
+    }
+
+    /**
+     * Apply an already-fetched georeference.it record (null = no record) to a
+     * specimen. Same rules as enrichSpecimen(); split out so batch lookups can
+     * reuse them.
+     */
+    public function applyRecord(Specimen $specimen, ?array $raw): bool
+    {
         if (!$raw) return false;
 
         $data = $this->normaliseOccurrence($raw);

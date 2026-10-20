@@ -270,6 +270,87 @@ class WikidataService
         $entity = $this->getEntity($qid);
         if (!$entity) return null;
 
+        return $this->placeFromEntity($entity);
+    }
+
+    /**
+     * Fetch several entities at once via wbgetentities, $chunk QIDs per request
+     * (the API allows 50; claims-heavy people are smaller to keep responses
+     * reasonable). Same entity shape as Special:EntityData's entities[QID], so
+     * the extract*() helpers work unchanged. Deleted/unknown items are left out
+     * of the result. $extra adds request params (e.g. sitefilter).
+     *
+     * Returns null when Wikidata couldn't be reached or answered badly — callers
+     * must not treat that as "these entities don't exist".
+     */
+    public function getEntities(array $qids, string $props, int $chunk = 50, array $extra = []): ?array
+    {
+        $qids   = array_values(array_unique(array_filter($qids)));
+        $result = [];
+
+        foreach (array_chunk($qids, $chunk) as $ids) {
+            try {
+                $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
+                    ->timeout(60)
+                    ->retry(2, 500, throw: false)
+                    ->get(self::ACTION_API_URL, $extra + [
+                        'action'    => 'wbgetentities',
+                        'ids'       => implode('|', $ids),
+                        'props'     => $props,
+                        'languages' => 'mul|en',
+                        'format'    => 'json',
+                    ]);
+            } catch (\Throwable $e) {
+                \Log::warning('Wikidata entity batch failed: ' . $e->getMessage());
+                return null;
+            }
+
+            if (!$response->ok() || !is_array($response->json('entities'))) {
+                \Log::warning('Wikidata entity batch failed: HTTP ' . $response->status());
+                return null;
+            }
+
+            foreach ($ids as $qid) {
+                $entity = $response->json('entities')[$qid] ?? null;
+                if ($entity && !isset($entity['missing'])) $result[$qid] = $entity;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Place details for many QIDs at once: one wbgetentities request per 50
+     * distinct QIDs instead of one full Special:EntityData download per point.
+     * Duplicates collapse (a voyage that starts and ends at the same port is
+     * one lookup).
+     *
+     * Deliberately NOT cached across syncs: the point of a sync is that edits
+     * made on Wikidata show up in Expeditia immediately.
+     *
+     * Returns ['Q123' => [name, description, image, lat, lon]|null, ...], or
+     * null when Wikidata couldn't be reached — callers must not treat that as
+     * "these places don't exist".
+     */
+    public function getPlaceDetailsMany(array $qids): ?array
+    {
+        $qids = array_values(array_unique(array_filter($qids)));
+        if (!$qids) return [];
+
+        $entities = $this->getEntities($qids, 'labels|descriptions|claims');
+        if ($entities === null) return null;
+
+        $result = [];
+        foreach ($qids as $qid) {
+            // Deleted/unknown QIDs are absent from getEntities()'s result.
+            $result[$qid] = isset($entities[$qid]) ? $this->placeFromEntity($entities[$qid]) : null;
+        }
+
+        return $result;
+    }
+
+    private function placeFromEntity(array $entity): array
+    {
         return [
             'name'        => $entity['labels']['mul']['value']       ?? $entity['labels']['en']['value']       ?? null,
             'description' => $entity['descriptions']['mul']['value'] ?? $entity['descriptions']['en']['value'] ?? null,

@@ -15,9 +15,17 @@ class GbifService
      */
 public function getOccurrence(string $id): ?array
 {
-    $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
-        ->timeout(280)
-        ->get(self::API_URL . 'occurrence/' . $id);
+    try {
+        $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
+            ->connectTimeout(10)
+            ->timeout(280)
+            ->get(self::API_URL . 'occurrence/' . $id);
+    } catch (\Illuminate\Http\Client\ConnectionException $e) {
+        // One unreachable/slow GBIF call must not 500 a whole sync step —
+        // callers already treat null as "no data for this occurrence".
+        \Log::warning("GBIF occurrence {$id} unreachable: " . $e->getMessage());
+        return null;
+    }
 
     return $response->ok()
         ? json_decode($response->body(), true, 512, JSON_BIGINT_AS_STRING)

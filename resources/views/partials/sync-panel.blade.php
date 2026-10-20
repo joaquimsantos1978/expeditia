@@ -54,12 +54,30 @@
         }
     }
 
+    // Place names come from Wikidata — never inject them as raw HTML.
+    function escapeHtml(s) {
+        return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // One log line for one itinerary point, e.g.
+    //   📍 Q3929 — Port Louis · via · 1832-05-01 🖼
+    //   ⚠️ Q123 — Somewhere · no coordinates (not saved)
+    function placeLine(p) {
+        const name = escapeHtml(p.name ?? '(no label)');
+        const meta = [p.type, p.date].filter(Boolean).map(escapeHtml).join(' · ');
+        const base = `${escapeHtml(p.qid)} — ${name}${meta ? ' · ' + meta : ''}`;
+        if (p.saved) return `📍 ${base}${p.has_image ? ' 🖼' : ''}`;
+        return `<span style="color:#dcdcaa">⚠️ ${base} · ${escapeHtml(p.skipped ?? 'not saved')} (not saved)</span>`;
+    }
+
     // Extra context to tack onto "Sync complete" when the terminating call
     // itself did real work (e.g. georeference.it corrected some specimens
     // right on the last page) — otherwise that final activity is invisible.
     function doneNote(step, data) {
         if (step === 'gbif_enrich')  return ` — GBIF enrich: ${data.updated ?? 0} specimen(s) updated`;
-        if (step === 'georeference') return ` — georeference.it: ${data.updated ?? 0} specimen(s) corrected`;
+        if (step === 'georeference') return data.georeference_down
+            ? ' — ⚠️ georeference.it was unreachable and was skipped'
+            : ` — georeference.it: ${data.updated ?? 0} specimen(s) corrected`;
         return '';
     }
 
@@ -80,7 +98,7 @@
                 return { msg: `📍 ${data.processed ?? ''}${name}${img}${deleted} (${data.remaining_points ?? 0} remaining)` };
             }
             case 'points_done':
-                return { msg: '📍 Itinerary complete' };
+                return { msg: `📍 Itinerary complete — ${data.points ?? 0}${data.total != null ? ' of ' + data.total : ''} point(s) saved` };
             case 'gbif':
                 return { msg: `🔬 GBIF: ${data.gbif_count ?? 0} specimen(s) imported` };
             case 'gbif_enrich':
@@ -168,6 +186,11 @@
             } catch (err) {
                 appendLine('❌ Request failed: ' + err.message, 'error');
                 break;
+            }
+
+            // One line per itinerary point (what was updated from Wikidata)
+            if (Array.isArray(data.places)) {
+                data.places.forEach(p => appendLine(placeLine(p)));
             }
 
             const { msg, type } = stepToMessage(data, redirectUrl);

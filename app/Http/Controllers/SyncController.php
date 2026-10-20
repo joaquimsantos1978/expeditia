@@ -115,8 +115,27 @@ class SyncController extends Controller
         $participants  = [];
         $qidsToResolve = [];
 
-        foreach ($this->wikidata->extractParticipantQids($entity) as $qid) {
-            $personEntity = $this->wikidata->getEntity($qid);
+        // One batched request per 25 participants instead of one full entity
+        // download each. 25 (not 50) because people are claims-heavy.
+        $participantQids = $this->wikidata->extractParticipantQids($entity);
+        $personEntities  = $this->wikidata->getEntities(
+            $participantQids,
+            'labels|descriptions|aliases|claims|sitelinks',
+            chunk: 25,
+            extra: ['sitefilter' => 'enwiki'],
+        );
+
+        if ($personEntities === null) {
+            // Wikidata unreachable — fail so the chain (or next cron run)
+            // retries, rather than saving the expedition with no participants.
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Could not fetch participants from Wikidata — will retry.',
+            ], 503);
+        }
+
+        foreach ($participantQids as $qid) {
+            $personEntity = $personEntities[$qid] ?? null;
             if (!$personEntity) continue;
 
             $data = $this->wikidata->extractPersonData($personEntity);
@@ -165,12 +184,15 @@ class SyncController extends Controller
             'step'       => 'meta',
             'expedition' => $expedition->wikidata_qid,
             'label'      => $expedition->label,
+            'points'     => count($itinerary),
             'next'       => route('sync.expedition.points', ['id' => $id, 'token' => $request->token]),
         ]);
     }
 
     // -------------------------------------------------------------------------
-    // Step 3 — Sync itinerary points one at a time
+    // Step 3 — Sync every itinerary point in one request. Place details come
+    // from a single batched Wikidata call (cached across expeditions) rather
+    // than one full entity download + one chained request per point.
     // -------------------------------------------------------------------------
     public function syncExpeditionPoints(Request $request, int $id)
     {
@@ -192,24 +214,55 @@ class SyncController extends Controller
             Point::where('expedition_id', $expedition->id)->delete();
         }
 
+        $nextUrl = route('sync.expedition.bionomia', ['id' => $id, 'token' => $request->token]);
+
         if (empty($itinerary)) {
             DB::table('sync_state')->where('key', $stateKey)->delete();
             return response()->json([
                 'status' => 'ok',
                 'step'   => 'points_done',
-                'next'   => route('sync.expedition.bionomia', ['id' => $id, 'token' => $request->token]),
+                'points' => 0,
+                'next'   => $nextUrl,
             ]);
         }
 
-        $pointData = array_shift($itinerary);
+        $places = $this->wikidata->getPlaceDetailsMany(array_column($itinerary, 'qid'));
 
-        DB::table('sync_state')->updateOrInsert(
-            ['key' => $stateKey],
-            ['value' => json_encode($itinerary)]
-        );
+        if ($places === null) {
+            // Wikidata unreachable — keep the itinerary in sync_state and fail
+            // the request so the chain (or the cron's next run) retries this
+            // step, instead of silently saving an expedition with no points.
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Could not fetch itinerary places from Wikidata — will retry.',
+            ], 503);
+        }
 
-        $place = $this->wikidata->getPlaceDetails($pointData['qid']);
-        if ($place && $place['lat']) {
+        $saved    = 0;
+        $placeLog = []; // one entry per itinerary point, shown line by line in the sync log
+        foreach ($itinerary as $pointData) {
+            $place = $places[$pointData['qid']] ?? null;
+
+            $entry = [
+                'qid'       => $pointData['qid'],
+                'name'      => $place['name'] ?? null,
+                'type'      => $pointData['type'],
+                'date'      => $pointData['point_in_time'] ?? $pointData['start_time'],
+                'has_image' => !empty($place['image']),
+                'saved'     => false,
+            ];
+
+            if (!$place) {
+                $entry['skipped'] = 'not found on Wikidata';
+                $placeLog[] = $entry;
+                continue;
+            }
+            if (!$place['lat']) {
+                $entry['skipped'] = 'no coordinates';
+                $placeLog[] = $entry;
+                continue;
+            }
+
             Point::updateOrCreate(
                 [
                     'expedition_id' => $expedition->id,
@@ -228,20 +281,20 @@ class SyncController extends Controller
                     'lon'           => $place['lon'],
                 ]
             );
+            $saved++;
+            $entry['saved'] = true;
+            $placeLog[] = $entry;
         }
 
-        $next = count($itinerary) > 0
-            ? route('sync.expedition.points', ['id' => $id, 'token' => $request->token])
-            : route('sync.expedition.bionomia', ['id' => $id, 'token' => $request->token]);
+        DB::table('sync_state')->where('key', $stateKey)->delete();
 
         return response()->json([
-            'status'           => 'ok',
-            'step'             => 'point',
-            'processed'        => $pointData['qid'],
-            'place_name'       => $place['name'] ?? null,
-            'has_image'        => !empty($place['image']),
-            'remaining_points' => count($itinerary),
-            'next'             => $next,
+            'status' => 'ok',
+            'step'   => 'points_done',
+            'points' => $saved,
+            'total'  => count($itinerary),
+            'places' => $placeLog,
+            'next'   => $nextUrl,
         ]);
     }
 
@@ -303,19 +356,42 @@ class SyncController extends Controller
             ->whereNotNull('specimens.gbif_id')
             ->where('specimens.id', '>', $lastId)
             ->orderBy('specimens.id')
-            ->limit(250)
+            ->limit(1000)
             ->get();
 
         $updated         = 0;
         $lastProcessedId = $lastId;
 
-        foreach ($specimens as $specimen) {
+        // Batched: one georeference.it request per BATCH_SIZE specimens
+        // instead of one per specimen (~400 requests/expedition before). If
+        // the server predates the batch filter lookupMany() returns null and
+        // we fall back to the per-specimen path, paced under the 300 req/min
+        // API throttle.
+        foreach ($specimens->chunk(GeoreferenceService::BATCH_SIZE) as $chunk) {
             if (time() - $startTime >= $budgetSeconds) break;
 
-            if ($this->georeference->enrichSpecimen($specimen)) $updated++;
-            $lastProcessedId = $specimen->id;
-            usleep(220000); // ~270 req/min, under georeference.it's Expeditia allowance of 300 req/min
+            $records = $this->georeference->lookupMany($chunk->pluck('gbif_id')->all());
+
+            // georeference.it unreachable (see GeoreferenceService): don't
+            // count this chunk as done, and stop trying for this step.
+            if ($records === null && $this->georeference->isUnavailable()) break;
+
+            foreach ($chunk as $specimen) {
+                if ($records !== null) {
+                    if ($this->georeference->applyRecord($specimen, $records['k' . $specimen->gbif_id] ?? null)) $updated++;
+                } else {
+                    if (time() - $startTime >= $budgetSeconds) break 2;
+                    if ($this->georeference->enrichSpecimen($specimen)) $updated++;
+                    if ($this->georeference->isUnavailable()) break 2;
+                    usleep(220000); // ~270 req/min
+                }
+                $lastProcessedId = $specimen->id;
+            }
+
+            if ($records !== null) usleep(300000); // be gentle between batches
         }
+
+        $georeferenceDown = $this->georeference->isUnavailable();
 
         if ($lastProcessedId > $lastId) {
             DB::table('sync_state')->updateOrInsert(
@@ -324,7 +400,10 @@ class SyncController extends Controller
             );
         }
 
-        $hasMore = $expedition->specimens()
+        // If georeference.it is down, finish the expedition without it rather
+        // than failing the whole chain: coordinates stay as GBIF/Bionomia gave
+        // them and a later resync will pick georeference.it up again.
+        $hasMore = !$georeferenceDown && $expedition->specimens()
             ->whereNotNull('specimens.gbif_id')
             ->where('specimens.id', '>', $lastProcessedId)
             ->exists();
@@ -362,6 +441,7 @@ class SyncController extends Controller
                 'status'    => 'done',
                 'step'      => 'georeference',
                 'map_items' => $count,
+                'georeference_down' => $georeferenceDown,
                 'updated'   => $updated,
                 'message'   => 'Expedition synced.',
             ]);
@@ -374,6 +454,7 @@ class SyncController extends Controller
                 'status'    => 'ok',
                 'step'      => 'georeference',
                 'map_items' => $count,
+                'georeference_down' => $georeferenceDown,
                 'updated'   => $updated,
                 'next'      => route('sync.expedition.meta', ['id' => $nextExpedition->id, 'token' => $request->token]),
             ]);
@@ -383,6 +464,7 @@ class SyncController extends Controller
             'status'    => 'done',
             'step'      => 'georeference',
             'map_items' => $count,
+            'georeference_down' => $georeferenceDown,
             'updated'   => $updated,
             'message'   => 'All expeditions synced.',
         ]);
@@ -394,7 +476,9 @@ class SyncController extends Controller
     public function syncExpeditionBionomia(Request $request, int $id)
     {
         $this->checkToken($request);
-        set_time_limit(60);
+        // The download phase streams the whole Bionomia CSV in one request
+        // (~20 s for 45k rows); the import phase stops itself after ~35 s.
+        set_time_limit(180);
 
         $expedition    = Expedition::findOrFail($id);
         $stateKey      = 'bionomia_done_' . $id;
@@ -757,6 +841,46 @@ class SyncController extends Controller
         }
 
         return response()->json(['status' => 'paused', 'steps' => $steps, 'next' => $next]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Read-only outbound connectivity check, run from THIS server — for
+    // diagnosing "cURL error 7 / could not connect" on shared hosting without
+    // shell access. Shows which IPs each upstream resolves to here (stale DNS
+    // shows up as an old IP) and whether a raw TCP connect to :443 works.
+    // -------------------------------------------------------------------------
+    public function diagnoseConnectivity(Request $request)
+    {
+        $this->checkToken($request);
+        set_time_limit(90);
+
+        $ms = fn(float $since) => round((microtime(true) - $since) * 1000) . ' ms';
+        $out = [];
+
+        foreach (['georeference.it', 'bionomia.net', 'api.gbif.org', 'www.wikidata.org'] as $host) {
+            $ips = @gethostbynamel($host) ?: [];
+            $row = ['resolved_ips' => $ips, 'tcp_443' => []];
+
+            foreach (array_slice($ips, 0, 3) as $ip) {
+                $t  = microtime(true);
+                $fp = @stream_socket_client("tcp://{$ip}:443", $errno, $errstr, 5);
+                $row['tcp_443'][$ip] = $fp ? 'ok (' . $ms($t) . ')' : "FAILED errno={$errno} {$errstr} (" . $ms($t) . ')';
+                if ($fp) fclose($fp);
+            }
+
+            $t = microtime(true);
+            try {
+                $r = Http::withHeaders(['User-Agent' => 'Expeditia/2.0 (https://expeditia.info)'])
+                    ->connectTimeout(5)->timeout(15)->get("https://{$host}/");
+                $row['https'] = 'HTTP ' . $r->status() . ' (' . $ms($t) . ')';
+            } catch (\Throwable $e) {
+                $row['https'] = 'ERROR: ' . $e->getMessage() . ' (' . $ms($t) . ')';
+            }
+
+            $out[$host] = $row;
+        }
+
+        return response()->json($out, 200, [], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     }
 
     // -------------------------------------------------------------------------

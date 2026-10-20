@@ -64,6 +64,7 @@ Route::get('/sync/specimen/{gbifId}/refresh', [SyncController::class, 'refreshSp
 Route::get('/sync/add/{qid}',                [SyncController::class, 'addExpedition'])->name('sync.add');
 Route::get('/sync/person/{id}',              [SyncController::class, 'syncPerson'])->name('sync.person');
 Route::get('/sync/cron',                     [SyncController::class, 'cronSync'])->name('sync.cron');
+Route::get('/sync/diagnose',                 [SyncController::class, 'diagnoseConnectivity'])->name('sync.diagnose');
 
 // Refresh institution stats + GBIF metadata (run after sync or on demand)
 // Optional params: ?limit=20&stale_days=30

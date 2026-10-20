@@ -13,6 +13,8 @@
     Data from Expeditia is made available under the <a href="http://opendatacommons.org/licenses/odbl/1.0/" target="_blank">Open Database License (ODbL)</a>. Individual contents are licensed under the <a href="http://opendatacommons.org/licenses/dbcl/1.0/" target="_blank">Database Contents License (DbCL)</a>. Original data sources are <a href="https://www.wikidata.org" target="_blank">Wikidata</a> (CC0), <a href="https://www.gbif.org" target="_blank">GBIF</a> (various), and <a href="https://bionomia.net" target="_blank">Bionomia</a> (CC0).
 </div>
 
+<p class="small mb-2">The source code is on <a href="https://github.com/joaquimsantos1978/expeditia" target="_blank" rel="noopener"><i class="bi bi-github"></i> GitHub</a> (MIT licence) — you can also run your own instance.</p>
+
 <p class="small text-muted mb-1">Note: responses are plain JSON, not JSON-LD. Semantic enrichment is planned for a future version.</p>
 
 {{-- ── Exports ─────────────────────────────────────────────────── --}}

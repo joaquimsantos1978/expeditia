@@ -68,6 +68,9 @@
 <h5 class="mt-4">WikiProject</h5>
 <p>Expeditia is developed in the context of the <a href="https://www.wikidata.org/wiki/Wikidata:WikiProject_Research_expeditions" target="_blank">Wikidata Research Expeditions WikiProject</a>, which aims to document scientific and research expeditions in Wikidata and make their data more accessible.</p>
 
+<h5 class="mt-4">Open source</h5>
+<p>The source code of Expeditia is public on <a href="https://github.com/joaquimsantos1978/expeditia" target="_blank" rel="noopener"><i class="bi bi-github"></i> GitHub</a> under the <a href="https://github.com/joaquimsantos1978/expeditia/blob/master/LICENSE" target="_blank" rel="noopener">MIT licence</a>. Bug reports, suggestions and contributions are welcome — please open an <a href="https://github.com/joaquimsantos1978/expeditia/issues" target="_blank" rel="noopener">issue</a>.</p>
+
 <h5 class="mt-4">Licence &amp; citation</h5>
 <div class="card bg-light border-0">
     <div class="card-body py-3">

@@ -70,6 +70,8 @@
             <a href="{{ route('about') }}" class="text-muted">About</a>
             &nbsp;·&nbsp;
             <a href="{{ route('about.developers') }}" class="text-muted">For developers</a>
+            &nbsp;·&nbsp;
+            <a href="https://github.com/joaquimsantos1978/expeditia" target="_blank" rel="noopener" class="text-muted"><i class="bi bi-github"></i> Source code</a>
         </p>
     </div>
 </footer>

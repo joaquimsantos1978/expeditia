@@ -365,6 +365,7 @@
     fetch(`/expedition/${QID}/map-data`)
         .then(r => r.json())
         .then(items => {
+            Antimeridian.normalize(items);   // keep points either side of 180° together
             allItems = items; window.allItems = items; window._renderDone = false;
             document.getElementById('itemsLoading')?.remove();
 

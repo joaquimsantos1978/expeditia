@@ -220,6 +220,41 @@ const OverlapGroups = (() => {
     };
 })();
 
+// ── Antimeridian ────────────────────────────────────────────────────────────
+// Longitudes are -180..180, so specimens collected either side of 180° (e.g. New
+// Zealand at 172°E and the Chatham Islands at 176°W, only ~8° apart) land on
+// opposite edges of the map, a whole world apart. When the points straddle the
+// antimeridian we move the western ones into a continuous frame (-176 → 184);
+// Leaflet draws longitudes beyond 180 without trouble. The frame starts right
+// after the widest empty gap of longitudes, and nothing is touched unless that
+// makes the data clearly more compact. Call once, before drawing anything.
+const Antimeridian = {
+    normalize(items) {
+        const rows = items.filter(i => i.lat !== null && i.lat !== '' && isFinite(Number(i.lon)) && i.lon !== null && i.lon !== '');
+        if (rows.length < 2) return;
+
+        const lons = [...new Set(rows.map(i => Number(i.lon)))].sort((a, b) => a - b);
+        if (lons.length < 2) return;
+        const defaultSpan = lons[lons.length - 1] - lons[0];
+        if (defaultSpan <= 180) return;                         // nothing straddles the antimeridian
+
+        // Widest gap between neighbouring longitudes, including the wrap-around one.
+        let gapAt = lons.length - 1, widest = lons[0] + 360 - lons[lons.length - 1];
+        for (let k = 0; k < lons.length - 1; k++) {
+            if (lons[k + 1] - lons[k] > widest) { widest = lons[k + 1] - lons[k]; gapAt = k; }
+        }
+        const start = lons[(gapAt + 1) % lons.length];          // first longitude after the gap
+        const shiftedSpan = 360 - widest;
+        if (shiftedSpan > 180 || shiftedSpan > defaultSpan - 20) return;   // not clearly better: leave as is
+
+        items.forEach(i => {
+            if (i.lat === null || i.lat === '' || i.lon === null || i.lon === '') return;
+            const lon = Number(i.lon);
+            if (isFinite(lon) && lon < start) i.lon = lon + 360;
+        });
+    },
+};
+
 // ── Route line ──────────────────────────────────────────────────────────────
 // Joining every dated specimen in order draws a thick grey bundle (a thousand
 // zig-zagging 1.5px lines). Specimens collected on the same day collapse to one

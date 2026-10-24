@@ -342,6 +342,7 @@
     fetch(`/person/${QID}/map-data`)
         .then(r => r.json())
         .then(items => {
+            Antimeridian.normalize(items);   // keep points either side of 180° together
             allItems = items; window.allItems = items;
             document.getElementById('itemsLoading')?.remove();
             renderNextBatch();

@@ -70,6 +70,11 @@
                     <button class="btn btn-outline-secondary" onclick="modalNavigate(1)"  style="min-width:56px;">Next →</button>
                 </div>
                 <div class="d-flex gap-2 align-items-center">
+                    <a id="specimenModalGeoref" href="#" class="btn btn-sm btn-outline-success" style="display:none;"
+                       onclick="openGeoreference(currentModalData && currentModalData.gbif); return false;"
+                       title="Georeference this specimen and its locality on georeference.it. When you close that window, this record is refreshed.">
+                        <i class="bi bi-geo-alt"></i> Georeference
+                    </a>
                     <button type="button" id="specimenModalRefresh" class="btn btn-sm btn-outline-secondary"
                             style="display:none;" onclick="refreshCurrentSpecimen()"
                             title="Re-fetch this specimen from GBIF and georeference.it">
@@ -307,12 +312,57 @@ function fillModal(d) {
     if (d.gbif) { gbifLink.href = `https://www.gbif.org/occurrence/${d.gbif}`; gbifLink.style.display = ''; }
     else          { gbifLink.style.display = 'none'; }
 
+    const georefBtn = document.getElementById('specimenModalGeoref');
+    if (georefBtn) {
+        georefBtn.style.display = d.gbif ? '' : 'none';
+        georefBtn.href = d.gbif ? georeferenceUrl(d.gbif) : '#';
+    }
+
     const refreshBtn = document.getElementById('specimenModalRefresh');
     refreshBtn.style.display = d.gbif ? '' : 'none';
     refreshBtn.disabled = false;
     refreshBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Refresh';
 
     updateMiniMap(d.lat || null, d.lon || null, d.coord_uncertainty_m || null);
+}
+
+// ── Georeference on georeference.it ────────────────────────────────────────────
+// https://georeference.it/georef?gbif=<key> opens the locality group the specimen
+// belongs to (every specimen sharing that locality text), with this one in it.
+// It is opened in a real popup window rather than an <iframe>: georeference.it
+// refuses to be framed (X-Frame-Options), its Google/GitHub/ORCID login cannot
+// run inside a frame, and cookies would be third-party there. When the window is
+// closed the specimen is re-fetched, so a georeference just submitted shows up
+// here without a manual Refresh (reload the page to see it on the map).
+function georeferenceUrl(gbifId) {
+    return 'https://georeference.it/georef?gbif=' + encodeURIComponent(String(gbifId).replace(/\D/g, ''));
+}
+
+let georefWindow = null, georefWatch = null;
+
+function openGeoreference(gbifId) {
+    gbifId = String(gbifId || '').replace(/\D/g, '');
+    if (!gbifId) return;
+    const url = georeferenceUrl(gbifId);
+
+    const w = Math.min(1360, screen.availWidth - 40), h = Math.min(900, screen.availHeight - 40);
+    const left = Math.max(0, Math.round((screen.availWidth - w) / 2)), top = Math.max(0, Math.round((screen.availHeight - h) / 2));
+    georefWindow = window.open(url, 'georeferenceit', `popup=yes,width=${w},height=${h},left=${left},top=${top}`);
+    if (!georefWindow) { window.open(url, '_blank', 'noopener'); return; }   // popup blocked: plain tab, no auto-refresh
+
+    clearInterval(georefWatch);
+    georefWatch = setInterval(async () => {
+        if (georefWindow && !georefWindow.closed) return;
+        clearInterval(georefWatch);
+        georefWindow = null;
+
+        const modalOpen = document.getElementById('specimenModal')?.classList.contains('show');
+        if (modalOpen && currentModalData && String(currentModalData.gbif) === gbifId) {
+            refreshCurrentSpecimen();                       // updates the open modal in place
+        } else {
+            fetch(`/sync/specimen/${gbifId}/refresh`).catch(() => {});   // from the list: refresh the stored record
+        }
+    }, 800);
 }
 
 // ── Refresh a single specimen from GBIF + georeference.it ──────────────────────

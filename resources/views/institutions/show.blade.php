@@ -166,7 +166,8 @@
         const collHtml = item.collection_code ? `<span class="institution-badge">${escHtml(item.collection_code)}</span>` : '';
         const noCoords = !item.lat ? `<span class="badge bg-light text-muted" style="font-size:10px;">no coordinates</span>` : '';
         const gbifLink = item.gbif_id ? `<a href="https://www.gbif.org/occurrence/${item.gbif_id}" target="_blank" class="small text-muted text-decoration-none" onclick="event.stopPropagation()">GBIF ↗</a>` : '';
-        const detailsBtn = `<div class="d-flex flex-wrap align-items-center gap-2 mt-1">${collHtml}${noCoords}${gbifLink}<button class="btn btn-link btn-sm p-0 small text-muted details-btn" onclick="event.stopPropagation();loadAndShowModal(${item.id})" disabled><span class="spinner-border spinner-border-sm"></span></button></div>`;
+        const georefLink = item.gbif_id ? `<a href="${georeferenceUrl(item.gbif_id)}" target="_blank" rel="noopener" class="small text-muted text-decoration-none" title="Georeference this specimen and its locality on georeference.it" onclick="event.stopPropagation();openGeoreference('${String(item.gbif_id).replace(/\D/g,'')}');return false;">📍 Georeference</a>` : '';
+        const detailsBtn = `<div class="d-flex flex-wrap align-items-center gap-2 mt-1">${collHtml}${noCoords}${gbifLink}${georefLink}<button class="btn btn-link btn-sm p-0 small text-muted details-btn" onclick="event.stopPropagation();loadAndShowModal(${item.id})" disabled><span class="spinner-border spinner-border-sm"></span></button></div>`;
         return `<div class="list-group-item d-flex align-items-start gap-2 py-2 map-item-row${!item.lat?' no-coords':''}" id="item-${item.id}" data-id="${item.id}" data-type="specimen" data-lat="${item.lat||''}" data-lon="${item.lon||''}" data-exp-index="${item.exp_index}" style="cursor:${item.lat?'pointer':'default'}">
             <div class="mt-1 flex-shrink-0">${hasDot}</div>
             <div class="flex-grow-1" style="min-width:0;">

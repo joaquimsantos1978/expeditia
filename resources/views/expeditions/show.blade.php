@@ -249,11 +249,12 @@
         const collectorHtml = item.recorded_by ? `<p class="small text-muted mb-0">👤 ${escHtml(item.recorded_by)}</p>` : '';
         const noCoords = !item.lat ? `<span class="badge bg-light text-muted" style="font-size:10px;">no coordinates</span>` : '';
         const gbifLink = item.gbif_id ? `<a href="https://www.gbif.org/occurrence/${item.gbif_id}" target="_blank" class="small text-muted text-decoration-none" onclick="event.stopPropagation()">GBIF ↗</a>` : '';
+        const georefLink = item.gbif_id ? `<a href="${georeferenceUrl(item.gbif_id)}" target="_blank" rel="noopener" class="small text-muted text-decoration-none" title="Georeference this specimen and its locality on georeference.it" onclick="event.stopPropagation();openGeoreference('${String(item.gbif_id).replace(/\D/g,'')}');return false;">📍 Georeference</a>` : '';
         const institutionBadge = (item.institution_code)
             ? `<span class="institution-badge">${escHtml(item.institution_code)}${item.collection_code ? ' / ' + escHtml(item.collection_code) : ''}</span>`
             : '';
         const detailsBtn = item.type==='specimen'
-            ? `<div class="d-flex flex-wrap align-items-center gap-2 mt-1">${institutionBadge}${noCoords}${gbifLink}<button class="btn btn-link btn-sm p-0 small text-muted details-btn" data-id="${item.id}" onclick="event.stopPropagation();loadAndShowModal(${item.id})" disabled><span class="spinner-border spinner-border-sm" role="status"></span></button></div>`
+            ? `<div class="d-flex flex-wrap align-items-center gap-2 mt-1">${institutionBadge}${noCoords}${gbifLink}${georefLink}<button class="btn btn-link btn-sm p-0 small text-muted details-btn" data-id="${item.id}" onclick="event.stopPropagation();loadAndShowModal(${item.id})" disabled><span class="spinner-border spinner-border-sm" role="status"></span></button></div>`
             : '';
         const desc = (!item.description || item.type==='specimen') ? '' : `<p class="small text-muted mb-0">${escHtml(item.description.substring(0,120))}</p>`;
         return `<div class="list-group-item d-flex align-items-start gap-2 py-2 map-item-row${!item.lat?' no-coords':''}" id="item-${item.id}" data-id="${item.id}" data-type="${escHtml(item.type)}" data-lat="${item.lat||''}" data-lon="${item.lon||''}" style="cursor:${item.lat?'pointer':'default'}">

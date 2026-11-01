@@ -202,7 +202,7 @@
         const collectorHtml = item.recorded_by ? `<p class="small text-muted mb-0">👤 ${escHtml(item.recorded_by)}</p>` : '';
         const noCoords = !item.lat ? `<span class="badge bg-light text-muted" style="font-size:10px;">no coordinates</span>` : '';
         const gbifLink = item.gbif_id ? `<a href="https://www.gbif.org/occurrence/${item.gbif_id}" target="_blank" class="small text-muted text-decoration-none" onclick="event.stopPropagation()">GBIF ↗</a>` : '';
-        const georefLink = item.gbif_id ? `<a href="${georeferenceUrl(item.gbif_id)}" target="_blank" rel="noopener" class="small text-muted text-decoration-none" title="Georeference this specimen and its locality on georeference.it" onclick="event.stopPropagation();openGeoreference('${String(item.gbif_id).replace(/\D/g,'')}');return false;">📍 Georeference</a>` : '';
+        const georefLink = item.gbif_id ? `<a href="${georeferenceUrl(item.gbif_id)}" target="_blank" rel="noopener" class="small text-muted text-decoration-none" title="Georeference this specimen and its locality on georeference.it" onclick="event.stopPropagation();openGeoreference('${String(item.gbif_id).replace(/\D/g,'')}');return false;"><img src="https://georeference.it/images/logo.png" alt="" width="14" height="14" style="vertical-align:-2px;margin-right:2px;"> Georeference</a>` : '';
         const institutionBadge = item.institution_code
             ? `<span class="institution-badge">${escHtml(item.institution_code)}${item.collection_code ? ' / ' + escHtml(item.collection_code) : ''}</span>`
             : '';

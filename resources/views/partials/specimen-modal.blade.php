@@ -73,7 +73,7 @@
                     <a id="specimenModalGeoref" href="#" class="btn btn-sm btn-outline-success" style="display:none;"
                        onclick="openGeoreference(currentModalData && currentModalData.gbif); return false;"
                        title="Georeference this specimen and its locality on georeference.it. When you close that window, this record is refreshed.">
-                        <i class="bi bi-geo-alt"></i> Georeference
+                        <img src="https://georeference.it/images/logo.png" alt="" width="14" height="14" style="vertical-align:-2px;margin-right:2px;"> Georeference
                     </a>
                     <button type="button" id="specimenModalRefresh" class="btn btn-sm btn-outline-secondary"
                             style="display:none;" onclick="refreshCurrentSpecimen()"

@@ -21,6 +21,14 @@ use Illuminate\Support\Facades\DB;
 
 class SyncController extends Controller
 {
+    // Seconds the GBIF discovery step may spend before handing the rest to the next request.
+    public int $gbifBudgetSeconds = 40;
+
+    // GBIF refuses offset + limit beyond this many results.
+    private const GBIF_MAX_OFFSET = 100000;
+
+    private array $expeditionById = [];
+
     public function __construct(
         protected WikidataService   $wikidata,
         protected GbifService       $gbif,
@@ -108,6 +116,9 @@ class SyncController extends Controller
         }
 
         $expedition->fill($this->wikidata->extractExpeditionData($entity))->save();
+
+        // A new run starts GBIF discovery from the first page, not from where an abandoned run stopped.
+        DB::table('sync_state')->where('key', 'gbif_discovery_cursor_' . $id)->delete();
 
         // Fetch every participant entity first, then resolve all the labels
         // they need (birth/death place, occupations) in one batched request
@@ -299,39 +310,118 @@ class SyncController extends Controller
     }
 
     // -------------------------------------------------------------------------
-    // Step 4 — Sync GBIF specimens + finalise expedition
+    // Step 4 — Sync GBIF specimens.
+    //
+    // Resumable: an expedition can have thousands of occurrences (one dataset has
+    // 2,000+), far more than fits in one request on shared hosting. So the work
+    // is done a page at a time within a time budget, the position is kept in
+    // sync_state, and the step returns itself as "next" until everything is saved.
+    //
+    //   1. occurrences Wikidata itself lists (P11146) — remaining ids kept in
+    //      gbif_ids_{id}
+    //   2. occurrences that carry the expedition's Wikidata id in parentEventID or
+    //      eventID, in any spelling (entity URI, page URL, bare QID) — position
+    //      kept in gbif_discovery_cursor_{id} as "<field index>:<offset>"
     // -------------------------------------------------------------------------
     public function syncExpeditionGbif(Request $request, int $id)
     {
         $this->checkToken($request);
-        set_time_limit(60);
+        set_time_limit(120);
 
         $expedition = Expedition::findOrFail($id);
+        $started    = time();
+        $saved      = 0;
+        $outOfTime  = fn() => time() - $started >= $this->gbifBudgetSeconds;
+        // Takes the count as an argument: an arrow function captures $saved by value when it is created.
+        $again      = fn(int $count) => response()->json([
+            'status'     => 'ok',
+            'step'       => 'gbif',
+            'gbif_count' => $count,
+            'next'       => route('sync.expedition.gbif', ['id' => $id, 'token' => $request->token]),
+        ]);
 
-        $saved  = DB::table('sync_state')->where('key', 'gbif_ids_' . $id)->value('value');
-        $occIds = $saved ? json_decode($saved, true) : [];
+        // ── 1. Occurrences listed on the expedition's Wikidata item ──────────
+        $idsKey = 'gbif_ids_' . $id;
+        $stored = DB::table('sync_state')->where('key', $idsKey)->value('value');
+        $occIds = $stored ? json_decode($stored, true) : [];
 
-        foreach ($occIds as $occId) {
-            $raw = $this->gbif->getOccurrence($occId);
-            if ($raw) $this->saveSpecimen($raw, $expedition->id);
-        }
-
-        $gbifSpecimens = $this->gbif->getOccurrencesByExpeditionQid($expedition->wikidata_qid);
-        foreach ($gbifSpecimens as $raw) {
-            try {
-                $this->saveSpecimen($raw, $expedition->id);
-            } catch (\Exception $e) {
-                \Log::warning("GBIF specimen save failed (key={$raw['key']}): " . $e->getMessage());
+        while ($occIds) {
+            $occId = array_shift($occIds);
+            $raw   = $this->gbif->getOccurrence($occId);
+            if ($raw) {
+                try {
+                    $this->saveSpecimen($raw, $expedition->id);
+                    $saved++;
+                } catch (\Exception $e) {
+                    \Log::warning("GBIF specimen save failed (key={$occId}): " . $e->getMessage());
+                }
             }
+            if ($outOfTime()) break;
         }
 
-        DB::table('sync_state')->where('key', 'gbif_ids_' . $id)->delete();
+        if ($occIds) {
+            DB::table('sync_state')->updateOrInsert(['key' => $idsKey], ['value' => json_encode(array_values($occIds))]);
+            return $again($saved);
+        }
+        DB::table('sync_state')->where('key', $idsKey)->delete();
+
+        // ── 2. Occurrences carrying the expedition's Wikidata id ─────────────
+        $cursorKey = 'gbif_discovery_cursor_' . $id;
+        $cursor    = explode(':', (string) (DB::table('sync_state')->where('key', $cursorKey)->value('value') ?? '0:0'));
+        $fieldIdx  = (int) ($cursor[0] ?? 0);
+        $offset    = (int) ($cursor[1] ?? 0);
+        $fields    = GbifService::WIKIDATA_ID_FIELDS;
+        $startYear = $this->gbif->yearOf($expedition->start_time);
+        $endYear   = $this->gbif->yearOf($expedition->end_time);
+
+        while ($fieldIdx < count($fields)) {
+            $page = $this->gbif->searchByWikidataId($expedition->wikidata_qid, $fields[$fieldIdx], $offset);
+
+            if ($page === null) {
+                // GBIF unreachable: keep the position and fail the request so the
+                // chain (or the cron's next run) retries, instead of finishing the
+                // expedition as if it had no GBIF specimens.
+                DB::table('sync_state')->updateOrInsert(['key' => $cursorKey], ['value' => "{$fieldIdx}:{$offset}"]);
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Could not reach GBIF — will retry.',
+                ], 503);
+            }
+
+            foreach ($page['results'] as $raw) {
+                // A bare short QID in the publisher's data may be an unrelated local code
+                if (!$this->gbif->isPlausibleMatch($raw, $fields[$fieldIdx], $expedition->wikidata_qid, $startYear, $endYear)) continue;
+
+                try {
+                    $this->saveSpecimen($raw, $expedition->id);
+                    $saved++;
+                } catch (\Exception $e) {
+                    \Log::warning("GBIF specimen save failed (key=" . ($raw['key'] ?? '?') . "): " . $e->getMessage());
+                }
+            }
+
+            $offset += GbifService::PAGE_SIZE;
+            if ($page['endOfRecords'] || !$page['results'] || $offset + GbifService::PAGE_SIZE > self::GBIF_MAX_OFFSET) {
+                $fieldIdx++;
+                $offset = 0;
+            }
+
+            DB::table('sync_state')->updateOrInsert(['key' => $cursorKey], ['value' => "{$fieldIdx}:{$offset}"]);
+
+            if ($outOfTime()) break;
+        }
+
+        if ($fieldIdx < count($fields)) {
+            return $again($saved);
+        }
+
+        DB::table('sync_state')->where('key', $cursorKey)->delete();
 
         return response()->json([
-            'status'    => 'ok',
-            'step'      => 'gbif',
-            'gbif_count'=> count($gbifSpecimens),
-            'next'      => route('sync.expedition.georeference', ['id' => $id, 'token' => $request->token]),
+            'status'     => 'ok',
+            'step'       => 'gbif',
+            'gbif_count' => $saved,
+            'next'       => route('sync.expedition.georeference', ['id' => $id, 'token' => $request->token]),
         ]);
     }
 
@@ -701,6 +791,7 @@ class SyncController extends Controller
 
         DB::table('sync_state')->where('key', 'itinerary_' . $expedition->id)->delete();
         DB::table('sync_state')->where('key', 'gbif_ids_' . $expedition->id)->delete();
+        DB::table('sync_state')->where('key', 'gbif_discovery_cursor_' . $expedition->id)->delete();
         DB::table('sync_state')->where('key', 'bionomia_done_' . $expedition->id)->delete();
         DB::table('sync_state')->where('key', 'like', 'bionomia_cursor_%')->delete();
         DB::table('sync_state')->where('key', 'gbif_enrich_cursor_' . $expedition->id)->delete();
@@ -1092,7 +1183,7 @@ class SyncController extends Controller
             $specimen->save();
         }
 
-        $this->linkSpecimenToExpedition($specimen, Expedition::find($expeditionId));
+        $this->linkSpecimenToExpedition($specimen, $this->expeditionById[$expeditionId] ??= Expedition::find($expeditionId));
 
         return $specimen;
     }
